@@ -1,0 +1,42 @@
+@import './base.css';
+
+#app {
+  min-height: 100vh;
+  font-weight: normal;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.money-cell {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.table-link {
+  color: var(--travel-accent);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.section-band {
+  align-items: center;
+  background: var(--travel-band);
+  border-left: 2px solid var(--travel-accent);
+  display: flex;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.section-title {
+  color: var(--travel-ink);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--travel-muted);
+}
