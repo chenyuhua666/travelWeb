@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import {
+  ArrowDown,
   CirclePlus,
   CopyDocument,
   Delete,
   EditPen,
+  WarningFilled,
   Refresh,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -16,7 +18,7 @@ import {
   submitReimbursement,
 } from '@/api/reimbursements'
 import { useMasterStore } from '@/stores/master'
-import type { City } from '@/types/master'
+import type { BusinessTypeNode, City } from '@/types/master'
 import type {
   AllocationSavePayload,
   ReimbursementDetail,
@@ -59,6 +61,7 @@ const submitting = ref(false)
 const initialized = ref(false)
 const dirty = ref(false)
 const currentId = ref<number | null>(null)
+const currentVersion = ref<number | null>(null)
 const reimNo = ref('')
 const status = ref<0 | 1 | 2 | 3>(0)
 const statusName = ref('草稿')
@@ -91,7 +94,8 @@ const tripDialog = reactive({
   travelerId: null as number | null,
   departCityId: null as number | null,
   arriveCityId: null as number | null,
-  dates: [] as string[],
+  departDate: '',
+  arriveDate: '',
   tripDescription: '',
 })
 
@@ -123,15 +127,26 @@ const tripRules: FormRules<typeof tripDialog> = {
   travelerId: [{ required: true, message: '请选择出行人', trigger: 'change' }],
   departCityId: [{ required: true, message: '请选择出发城市', trigger: 'change' }],
   arriveCityId: [{ required: true, message: '请选择到达城市', trigger: 'change' }],
-  dates: [
+  departDate: [
     {
-      validator: (_rule, value: string[], callback) => {
-        if (!value || value.length !== 2) {
-          callback(new Error('请选择出发到达日期'))
+      validator: (_rule, value: string, callback) => {
+        if (!value) {
+          callback(new Error('请选择出发日期'))
           return
         }
-        const [departDate, arriveDate] = value
-        if (!departDate || !arriveDate || arriveDate < departDate) {
+        callback()
+      },
+      trigger: 'change',
+    },
+  ],
+  arriveDate: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (!value) {
+          callback(new Error('请选择到达日期'))
+          return
+        }
+        if (tripDialog.departDate && value < tripDialog.departDate) {
           callback(new Error('到达日期不可早于出发日期'))
           return
         }
@@ -168,12 +183,23 @@ const totalSelectedStandards = computed(() =>
     ),
   ),
 )
+const selectedBusinessTypeName = computed(() => findBusinessTypeName(masterStore.businessTypes, form.businessTypeId))
 const allocationPercentTotal = computed(() =>
   roundMoney(form.allocations.reduce((sum, row) => sum + Number(row.percent || 0), 0)),
 )
 const allocationAmountTotal = computed(() =>
   roundMoney(form.allocations.reduce((sum, row) => sum + Number(row.amount || 0), 0)),
 )
+const documentDateText = computed(() => savedDate.value.replaceAll('-', '/'))
+const tripHeaderSummary = computed(() => {
+  const daysByTraveler = new Map<string, number>()
+  form.trips.forEach((trip) => {
+    const name = employeeName(trip.travelerId)
+    daysByTraveler.set(name, (daysByTraveler.get(name) || 0) + tripDays(trip))
+  })
+  const travelerText = [...daysByTraveler.entries()].map(([name, days]) => `${name}:${days}天`).join('、')
+  return travelerText ? `${money(subsidyTotal.value)} (${travelerText})` : money(subsidyTotal.value)
+})
 
 function emptyAllocation(): AllocationRow {
   return {
@@ -194,12 +220,53 @@ function employeeLabel(id: number | null) {
   return employee ? `${employee.employeeName}[${employee.employeeNo}]` : '-'
 }
 
+function employeeName(id: number | null) {
+  return masterStore.employees.find((item) => item.id === id)?.employeeName || '-'
+}
+
 function cityLabel(id: number | null) {
   return masterStore.cities.find((item) => item.id === id)?.cityName || '-'
 }
 
+function findBusinessTypeName(nodes: BusinessTypeNode[], id: number | null): string {
+  if (!id) {
+    return '-'
+  }
+  for (const node of nodes) {
+    if (node.id === id) {
+      return node.businessTypeName
+    }
+    const childName = findBusinessTypeName(node.children || [], id)
+    if (childName !== '-') {
+      return childName
+    }
+  }
+  return '-'
+}
+
 function selectedCity(trip: TripSavePayload) {
   return masterStore.cities.find((item) => item.id === trip.arriveCityId)
+}
+
+function tripDays(trip: TripSavePayload) {
+  return dateRange(trip.departDate, trip.arriveDate).length
+}
+
+function tripRouteSummary(trip: TripSavePayload) {
+  return `${cityLabel(trip.departCityId)} - ${cityLabel(trip.arriveCityId)} ${tripDays(trip)}天`
+}
+
+function cloneTripRow(row: TripRow): TripRow {
+  return {
+    key: row.key,
+    travelerId: row.travelerId,
+    departCityId: row.departCityId,
+    arriveCityId: row.arriveCityId,
+    departDate: row.departDate,
+    arriveDate: row.arriveDate,
+    tripDescription: row.tripDescription,
+    subsidyDays: row.subsidyDays.map((day) => ({ ...day })),
+  }
 }
 
 function standardAmount(trip: TripSavePayload, kind: 'meal' | 'transportation' | 'phone') {
@@ -228,14 +295,48 @@ function sumAllowance(kind: 'meal' | 'transportation' | 'phone') {
   )
 }
 
+function sumTripAllowance(trip: TripSavePayload, kind: 'meal' | 'transportation' | 'phone') {
+  return roundMoney(
+    trip.subsidyDays.reduce((sum, day) => {
+      if (kind === 'meal') {
+        return sum + (day.mealSelected ? Number(day.mealAmount || 0) : 0)
+      }
+      if (kind === 'transportation') {
+        return sum + (day.transportationSelected ? Number(day.transportationAmount || 0) : 0)
+      }
+      return sum + (day.phoneSelected ? Number(day.phoneAmount || 0) : 0)
+    }, 0),
+  )
+}
+
+function tripAllowanceTotal(trip: TripSavePayload) {
+  return roundMoney(
+    sumTripAllowance(trip, 'meal') + sumTripAllowance(trip, 'transportation') + sumTripAllowance(trip, 'phone'),
+  )
+}
+
+function tripSelectedStandards(trip: TripSavePayload) {
+  return roundMoney(
+    trip.subsidyDays.reduce(
+      (sum, day) =>
+        sum +
+        (day.mealSelected ? standardAmount(trip, 'meal') : 0) +
+        (day.transportationSelected ? 40 : 0) +
+        (day.phoneSelected ? 40 : 0),
+      0,
+    ),
+  )
+}
+
 function openTripDialog(mode: 'create' | 'edit' | 'copy', row?: TripRow, index?: number) {
   tripDialogIndex.value = mode === 'edit' && typeof index === 'number' ? index : null
-  tripDialogSeed.value = row ? structuredClone(row) : null
+  tripDialogSeed.value = row ? cloneTripRow(row) : null
   Object.assign(tripDialog, {
     travelerId: row?.travelerId ?? null,
     departCityId: row?.departCityId ?? null,
     arriveCityId: row?.arriveCityId ?? null,
-    dates: row ? [row.departDate, row.arriveDate] : [],
+    departDate: row?.departDate ?? '',
+    arriveDate: row?.arriveDate ?? '',
     tripDescription: row?.tripDescription ?? '',
   })
   tripDialogVisible.value = true
@@ -253,7 +354,7 @@ function hasTripOverlap(candidate: TripSavePayload, ignoredIndex: number | null)
 
 async function confirmTrip() {
   await tripFormRef.value?.validate()
-  const [departDate, arriveDate] = tripDialog.dates
+  const { departDate, arriveDate } = tripDialog
   if (!departDate || !arriveDate) {
     return
   }
@@ -380,37 +481,39 @@ async function removeAllocation(index: number) {
 }
 
 function changePercent(index: number) {
-  const rowsAfterFirst = form.allocations.slice(1)
-  const total = roundMoney(rowsAfterFirst.reduce((sum, row) => sum + Number(row.percent || 0), 0))
-  if (total > 100) {
-    const row = form.allocations[index]
-    if (row) {
-      row.percent = 0
-    }
-    ElMessage.warning('第二行起的分摊比例合计不可超过100%')
+  const row = form.allocations[index]
+  if (!row) {
+    return
   }
-  recalculateAllocations()
+  row.percent = roundMoney(Math.min(Math.max(Number(row.percent || 0), 0), 100))
+  row.amount = roundMoney((subsidyTotal.value * row.percent) / 100)
+  const total = roundMoney(form.allocations.reduce((sum, item) => sum + Number(item.percent || 0), 0))
+  if (total > 100) {
+    ElMessage.warning('分摊比例合计不可超过100%')
+  }
+}
+
+function changeAmount(index: number) {
+  const row = form.allocations[index]
+  if (!row) {
+    return
+  }
+  row.amount = roundMoney(Math.max(Number(row.amount || 0), 0))
+  row.percent = subsidyTotal.value ? roundMoney((row.amount / subsidyTotal.value) * 100) : 0
+  const total = roundMoney(form.allocations.reduce((sum, item) => sum + Number(item.amount || 0), 0))
+  if (total > subsidyTotal.value) {
+    ElMessage.warning('分摊金额合计不可超过补助总金额')
+  }
 }
 
 function recalculateAllocations() {
   if (!form.allocations.length) {
     form.allocations.push(emptyAllocation())
   }
-  const firstRow = form.allocations[0]
-  if (!firstRow) {
-    return
-  }
-  const otherPercent = roundMoney(
-    form.allocations.slice(1).reduce((sum, row) => sum + Number(row.percent || 0), 0),
-  )
-  firstRow.percent = roundMoney(Math.max(0, 100 - otherPercent))
-  let otherAmount = 0
-  form.allocations.slice(1).forEach((row) => {
+  form.allocations.forEach((row) => {
     row.percent = roundMoney(Math.min(Math.max(Number(row.percent || 0), 0), 100))
     row.amount = roundMoney((subsidyTotal.value * row.percent) / 100)
-    otherAmount += row.amount
   })
-  firstRow.amount = roundMoney(Math.max(0, subsidyTotal.value - otherAmount))
 }
 
 function averageAllocations() {
@@ -419,10 +522,10 @@ function averageAllocations() {
     return
   }
   const regularPercent = roundMoney(100 / rowCount)
+  let usedPercent = 0
   form.allocations.forEach((row, index) => {
-    if (index > 0) {
-      row.percent = regularPercent
-    }
+    row.percent = index === rowCount - 1 ? roundMoney(100 - usedPercent) : regularPercent
+    usedPercent = roundMoney(usedPercent + row.percent)
   })
   recalculateAllocations()
 }
@@ -442,6 +545,7 @@ function buildPayload(): ReimbursementDraftPayload {
     businessTypeId: form.businessTypeId,
     businessTripReason: form.businessTripReason,
     remarks: form.remarks,
+    version: currentId.value ? currentVersion.value : null,
     trips: form.trips.map(({ key: _key, ...trip }) => trip),
     allocations,
   }
@@ -449,6 +553,7 @@ function buildPayload(): ReimbursementDraftPayload {
 
 function mapDetail(detail: ReimbursementDetail) {
   currentId.value = detail.id
+  currentVersion.value = detail.version
   reimNo.value = detail.reimNo
   status.value = detail.status
   statusName.value = detail.statusName
@@ -612,21 +717,17 @@ onMounted(async () => {
 <template>
   <main v-loading="loading" class="document-page">
     <header class="document-header">
-      <div class="document-meta">
-        <span>{{ reimNo || '草稿待编号' }}</span>
-        <el-tag :type="status === 1 ? 'success' : status === 2 ? 'info' : status === 3 ? 'primary' : 'warning'">
-          {{ statusName }}
-        </el-tag>
-      </div>
       <h1>差旅费用报销单</h1>
-      <span>提单日期 {{ savedDate }}</span>
+      <span>提单日期 {{ documentDateText }}</span>
     </header>
 
     <article class="document-body">
       <section class="doc-section">
         <button class="section-band" type="button" @click="toggleSection('basic')">
           <span class="section-title">基础信息</span>
-          <span>{{ sections.basic ? '收起' : '展开' }}</span>
+          <span class="section-trailer">
+            <el-icon class="section-chevron"><ArrowDown /></el-icon>
+          </span>
         </button>
         <el-form
           v-show="sections.basic"
@@ -700,7 +801,13 @@ onMounted(async () => {
             <el-button v-if="!readonly" link type="primary" :icon="CirclePlus" @click="openTripDialog('create')">
               补录行程
             </el-button>
-            <el-button link @click="toggleSection('trips')">{{ sections.trips ? '收起' : '展开' }}</el-button>
+            <span class="section-summary">
+              {{ tripHeaderSummary }}
+              <el-icon class="section-summary-icon"><WarningFilled /></el-icon>
+            </span>
+            <button class="section-toggle" type="button" @click="toggleSection('trips')">
+              <el-icon class="section-chevron"><ArrowDown /></el-icon>
+            </button>
           </div>
         </div>
         <el-table v-show="sections.trips" border :data="form.trips">
@@ -718,13 +825,13 @@ onMounted(async () => {
           <el-table-column label="操作" width="182">
             <template #default="{ row, $index }">
               <el-tooltip content="删除">
-                <el-button link :disabled="readonly" :icon="Delete" @click="removeTrip($index)" />
+                <el-button link :disabled="readonly" :icon="Delete" @click.stop="removeTrip($index)" />
               </el-tooltip>
               <el-tooltip content="编辑">
-                <el-button link :disabled="readonly" :icon="EditPen" @click="openTripDialog('edit', row, $index)" />
+                <el-button link :disabled="readonly" :icon="EditPen" @click.stop="openTripDialog('edit', row, $index)" />
               </el-tooltip>
               <el-tooltip content="复制">
-                <el-button link :disabled="readonly" :icon="CopyDocument" @click="openTripDialog('copy', row)" />
+                <el-button link :disabled="readonly" :icon="CopyDocument" @click.stop="openTripDialog('copy', row)" />
               </el-tooltip>
             </template>
           </el-table-column>
@@ -734,16 +841,11 @@ onMounted(async () => {
       <section class="doc-section">
         <button class="section-band" type="button" @click="toggleSection('subsidy')">
           <span class="section-title">补助信息</span>
-          <span>{{ sections.subsidy ? '收起' : '展开' }}</span>
+          <span class="section-trailer">
+            <el-icon class="section-chevron"><ArrowDown /></el-icon>
+          </span>
         </button>
         <template v-if="sections.subsidy">
-          <el-alert
-            class="subsidy-tip"
-            title="请根据实际出差日期选择补助；出差期间当日有用餐安排或用车的，请自行核减当日补助。"
-            :closable="false"
-            show-icon
-            type="warning"
-          />
           <el-table border :data="form.trips">
             <el-table-column type="index" label="序号" width="64" />
             <el-table-column label="出行人" min-width="150">
@@ -807,7 +909,10 @@ onMounted(async () => {
       <section class="doc-section">
         <button class="section-band" type="button" @click="toggleSection('total')">
           <span class="section-title">费用合计</span>
-          <span>{{ sections.total ? '收起' : '展开' }}</span>
+          <span class="section-trailer">
+            <span class="section-summary">差旅费总金额：{{ money(subsidyTotal) }}</span>
+            <el-icon class="section-chevron"><ArrowDown /></el-icon>
+          </span>
         </button>
         <dl v-show="sections.total" class="totals">
           <div><dt>补助总金额</dt><dd>{{ money(subsidyTotal) }}</dd></div>
@@ -821,15 +926,17 @@ onMounted(async () => {
         <div class="section-band">
           <button class="section-title bare-title" type="button" @click="toggleSection('allocations')">
             费用归属及分摊
-            <span class="section-note">分摊金额：{{ money(subsidyTotal) }}</span>
           </button>
           <div class="section-actions">
             <el-button v-if="!readonly" link type="primary" :icon="Refresh" @click="averageAllocations">均摊</el-button>
-            <el-button link @click="toggleSection('allocations')">{{ sections.allocations ? '收起' : '展开' }}</el-button>
+            <span class="section-summary">分摊金额：{{ money(subsidyTotal) }}</span>
+            <button class="section-toggle" type="button" @click="toggleSection('allocations')">
+              <el-icon class="section-chevron"><ArrowDown /></el-icon>
+            </button>
           </div>
         </div>
         <template v-if="sections.allocations">
-          <el-table border :data="form.allocations">
+          <el-table class="allocation-table" border :data="form.allocations">
             <el-table-column type="index" label="序号" width="64" />
             <el-table-column label="费用归属" min-width="260">
               <template #default="{ row }">
@@ -857,21 +964,34 @@ onMounted(async () => {
             </el-table-column>
             <el-table-column align="right" label="分摊比例" min-width="180">
               <template #default="{ row, $index }">
-                <el-input-number
-                  v-if="$index > 0"
-                  v-model="row.percent"
-                  :disabled="readonly"
-                  :max="100"
-                  :min="0"
-                  :precision="2"
-                  controls-position="right"
-                  @change="changePercent($index)"
-                />
-                <span v-else>{{ formatPercent(row.percent) }}</span>
+                <div class="allocation-number">
+                  <el-input-number
+                    v-model="row.percent"
+                    :disabled="readonly"
+                    :max="100"
+                    :min="0"
+                    :precision="2"
+                    controls-position="right"
+                    @change="changePercent($index)"
+                  />
+                  <span>%</span>
+                </div>
               </template>
             </el-table-column>
             <el-table-column align="right" label="分摊金额" min-width="150">
-              <template #default="{ row }">{{ money(row.amount) }}</template>
+              <template #default="{ row, $index }">
+                <div class="allocation-number">
+                  <el-input-number
+                    v-model="row.amount"
+                    :disabled="readonly"
+                    :min="0"
+                    :precision="2"
+                    controls-position="right"
+                    @change="changeAmount($index)"
+                  />
+                  <span>CNY</span>
+                </div>
+              </template>
             </el-table-column>
             <el-table-column label="操作" width="90">
               <template #default="{ $index }">
@@ -896,8 +1016,12 @@ onMounted(async () => {
         <div class="section-band">
           <button class="section-title bare-title" type="button" @click="toggleSection('remarks')">备注信息</button>
           <div class="section-actions">
-            <el-button v-if="!readonly" link :icon="Delete" type="primary" @click="clearRemarks">删除备注</el-button>
-            <el-button link @click="toggleSection('remarks')">{{ sections.remarks ? '收起' : '展开' }}</el-button>
+            <el-button v-if="!readonly" class="danger-link" link :icon="Delete" type="danger" @click="clearRemarks">
+              删除备注
+            </el-button>
+            <button class="section-toggle" type="button" @click="toggleSection('remarks')">
+              <el-icon class="section-chevron"><ArrowDown /></el-icon>
+            </button>
           </div>
         </div>
         <el-input
@@ -921,15 +1045,15 @@ onMounted(async () => {
     </footer>
   </main>
 
-  <el-dialog v-model="tripDialogVisible" title="补录行程" width="min(820px, 94vw)">
+  <el-dialog v-model="tripDialogVisible" class="trip-dialog" title="补录行程" width="min(820px, 94vw)">
     <el-alert
       class="dialog-tip"
-      title="仅可补录未从申请单带入或未产生费用的行程信息；跨天跨城行程按到达城市匹配补助。"
+      title="仅可补录未从申请单带入或未产生费用的行程信息。跨天跨城行程填写说明：出发城市-到达城市：武汉-北京；出发日期-到达日期：1号-5号；1号-5号补助按北京匹配"
       :closable="false"
       show-icon
       type="warning"
     />
-    <el-form ref="tripFormRef" :model="tripDialog" :rules="tripRules" label-width="138px">
+    <el-form ref="tripFormRef" class="trip-form" :model="tripDialog" :rules="tripRules" label-width="96px">
       <el-form-item label="出行人" prop="travelerId">
         <el-select v-model="tripDialog.travelerId" filterable placeholder="请选择">
           <el-option
@@ -940,27 +1064,38 @@ onMounted(async () => {
           />
         </el-select>
       </el-form-item>
-      <el-form-item label="出发城市" prop="departCityId">
-        <el-select v-model="tripDialog.departCityId" filterable placeholder="请选择">
-          <el-option v-for="item in masterStore.cities" :key="item.id" :label="item.cityName" :value="item.id" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="到达城市" prop="arriveCityId">
-        <el-select v-model="tripDialog.arriveCityId" filterable placeholder="请选择">
-          <el-option v-for="item in masterStore.cities" :key="item.id" :label="item.cityName" :value="item.id" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="出发到达日期" prop="dates">
-        <el-date-picker
-          v-model="tripDialog.dates"
-          :disabled-date="disabledFutureDate"
-          end-placeholder="到达日期"
-          range-separator="-"
-          start-placeholder="出发日期"
-          type="daterange"
-          value-format="YYYY-MM-DD"
-        />
-      </el-form-item>
+      <div class="trip-field-row">
+        <el-form-item label="出发城市" prop="departCityId">
+          <el-select v-model="tripDialog.departCityId" filterable placeholder="请选择城市">
+            <el-option v-for="item in masterStore.cities" :key="item.id" :label="item.cityName" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="到达城市" prop="arriveCityId">
+          <el-select v-model="tripDialog.arriveCityId" filterable placeholder="请选择城市">
+            <el-option v-for="item in masterStore.cities" :key="item.id" :label="item.cityName" :value="item.id" />
+          </el-select>
+        </el-form-item>
+      </div>
+      <div class="trip-field-row">
+        <el-form-item label="出发日期" prop="departDate">
+          <el-date-picker
+            v-model="tripDialog.departDate"
+            :disabled-date="disabledFutureDate"
+            placeholder="选择日期"
+            type="date"
+            value-format="YYYY-MM-DD"
+          />
+        </el-form-item>
+        <el-form-item label="到达日期" prop="arriveDate">
+          <el-date-picker
+            v-model="tripDialog.arriveDate"
+            :disabled-date="disabledFutureDate"
+            placeholder="选择日期"
+            type="date"
+            value-format="YYYY-MM-DD"
+          />
+        </el-form-item>
+      </div>
       <el-form-item label="行程说明" prop="tripDescription">
         <el-input
           v-model="tripDialog.tripDescription"
@@ -982,19 +1117,33 @@ onMounted(async () => {
   <el-dialog v-model="subsidyDialogVisible" class="subsidy-dialog" title="补助日历" width="min(1240px, 96vw)">
     <div v-if="subsidyTrip" class="subsidy-calendar">
       <aside class="subsidy-aside">
-        <div>
+        <div class="aside-detail">
           <span class="muted">出差类型</span>
-          <strong>{{ masterStore.businessTypes.length ? '差旅报销' : '-' }}</strong>
+          <strong class="business-type-value">{{ selectedBusinessTypeName }}</strong>
         </div>
-        <div class="route-panel">
-          <span>开始日期 {{ subsidyTrip.departDate }}</span>
-          <strong>{{ cityLabel(subsidyTrip.departCityId) }} - {{ cityLabel(subsidyTrip.arriveCityId) }}</strong>
-          <span>{{ dateRange(subsidyTrip.departDate, subsidyTrip.arriveDate).length }}天</span>
-          <span>结束日期 {{ subsidyTrip.arriveDate }}</span>
+        <div class="trip-summary">
+          <div class="aside-detail">
+            <span class="muted">开始日期</span>
+            <strong>{{ subsidyTrip.departDate }}</strong>
+          </div>
+          <div class="aside-detail trip-days-row">
+            <span>行程天数</span>
+            <strong>{{ tripRouteSummary(subsidyTrip) }}</strong>
+          </div>
+          <div class="aside-detail">
+            <span class="muted">结束日期</span>
+            <strong>{{ subsidyTrip.arriveDate }}</strong>
+          </div>
         </div>
         <div class="amount-panel">
-          <span>补助金额 <strong>CNY {{ money(sumAllowance('meal') + sumAllowance('transportation') + sumAllowance('phone')) }}</strong></span>
-          <span>标准总额 <strong>CNY {{ money(totalSelectedStandards) }}</strong></span>
+          <div>
+            <span class="muted">补助金额</span>
+            <span class="amount-value"><span>CNY</span><strong>{{ money(tripAllowanceTotal(subsidyTrip)) }}</strong></span>
+          </div>
+          <div>
+            <span class="muted">标准总额</span>
+            <span class="amount-value"><span>CNY</span><strong>{{ money(tripSelectedStandards(subsidyTrip)) }}</strong></span>
+          </div>
         </div>
       </aside>
       <div class="calendar-table">
@@ -1107,8 +1256,6 @@ onMounted(async () => {
 .document-page {
   display: grid;
   gap: 16px;
-  margin: 0 auto;
-  max-width: 1200px;
   padding-bottom: 78px;
 }
 
@@ -1117,21 +1264,24 @@ onMounted(async () => {
   background: var(--travel-surface);
   border-bottom: 1px solid var(--travel-border);
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  min-height: 54px;
-  padding: 0 18px;
+  grid-template-columns: 1fr auto;
+  min-height: 64px;
+  padding: 0 28px;
   position: sticky;
   top: 0;
   z-index: 6;
 }
 
 .document-header h1 {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
-  text-align: center;
+  justify-self: start;
+  text-align: left;
 }
 
 .document-header > span {
+  color: var(--travel-muted);
+  font-weight: 600;
   justify-self: end;
 }
 
@@ -1147,7 +1297,10 @@ onMounted(async () => {
   border-radius: 6px;
   display: grid;
   gap: 20px;
+  margin: 0 auto;
+  max-width: 1200px;
   padding: clamp(12px, 2vw, 20px);
+  width: 100%;
 }
 
 .doc-section {
@@ -1173,14 +1326,51 @@ onMounted(async () => {
 .section-actions {
   align-items: center;
   display: flex;
-  gap: 4px;
+  gap: 10px;
 }
 
-.section-note {
-  color: var(--travel-muted);
+.section-trailer,
+.section-summary {
+  align-items: center;
+  color: #7c8798;
+  display: inline-flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.section-summary {
   font-size: 14px;
-  font-weight: 400;
-  margin-left: 8px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.section-summary-icon {
+  color: #c7a344;
+  font-size: 15px;
+}
+
+.section-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #9aa4b2;
+  cursor: pointer;
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  width: 28px;
+}
+
+.section-chevron {
+  color: #9aa4b2;
+  font-size: 16px;
+}
+
+.danger-link {
+  --el-button-text-color: var(--el-color-danger);
+  --el-button-hover-text-color: var(--el-color-danger-light-3);
+  --el-button-active-text-color: var(--el-color-danger-dark-2);
 }
 
 .basic-grid {
@@ -1199,9 +1389,25 @@ onMounted(async () => {
   grid-column: 1 / -1;
 }
 
-.subsidy-tip,
 .dialog-tip {
   margin-bottom: 2px;
+}
+
+.trip-form {
+  display: grid;
+  gap: 0 18px;
+}
+
+.trip-field-row {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.trip-form :deep(.el-select),
+.trip-form :deep(.el-date-editor.el-input),
+.trip-form :deep(.el-textarea) {
+  width: 100%;
 }
 
 .totals {
@@ -1253,6 +1459,34 @@ onMounted(async () => {
   text-align: right;
 }
 
+.allocation-number {
+  align-items: center;
+  color: #7c8798;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.allocation-number :deep(.el-input-number) {
+  width: 142px;
+}
+
+.allocation-table :deep(.el-input__wrapper),
+.allocation-table :deep(.el-select__wrapper) {
+  background: #f7f9fc;
+}
+
+.allocation-table :deep(.el-input__inner),
+.allocation-table :deep(.el-select__selected-item) {
+  color: #7c8798;
+}
+
+.allocation-table :deep(.el-input-number__decrease),
+.allocation-table :deep(.el-input-number__increase) {
+  color: #a8b0bd;
+}
+
 .document-footer {
   align-items: center;
   background: rgba(255, 255, 255, 0.96);
@@ -1274,38 +1508,88 @@ onMounted(async () => {
   gap: 18px;
   grid-template-columns: 260px minmax(0, 1fr);
   min-height: 520px;
+  --subsidy-yellow: #b59a46;
 }
 
 .subsidy-aside {
   border-right: 1px solid var(--travel-border);
   display: grid;
-  gap: 18px;
+  gap: 16px;
   grid-auto-rows: max-content;
   padding-right: 18px;
 }
 
-.subsidy-aside > div:first-child,
-.amount-panel {
-  display: grid;
-  gap: 10px;
-}
-
-.route-panel {
-  border: 1px solid var(--travel-border);
+.aside-detail {
+  align-items: center;
   display: grid;
   gap: 14px;
-  padding: 14px;
+  grid-template-columns: 96px minmax(0, 1fr);
+  min-height: 32px;
 }
 
-.route-panel strong {
+.aside-detail strong {
+  color: var(--travel-ink);
+  font-weight: 500;
+  justify-self: end;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.business-type-value {
+  color: var(--subsidy-yellow) !important;
+}
+
+.trip-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.trip-days-row {
   background: var(--travel-accent);
   color: #fff;
-  padding: 8px;
+  min-height: 36px;
+  padding: 0 10px;
 }
 
-.amount-panel strong,
+.trip-days-row span,
+.trip-days-row strong {
+  color: #fff;
+}
+
+.amount-panel {
+  border-top: 1px solid var(--travel-border);
+  display: grid;
+  gap: 12px;
+  padding-top: 18px;
+}
+
+.amount-panel > div {
+  align-items: center;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.amount-value {
+  align-items: baseline;
+  color: var(--travel-ink);
+  display: grid;
+  gap: 18px;
+  grid-template-columns: 44px minmax(70px, 1fr);
+  justify-self: end;
+  min-width: 152px;
+}
+
+.amount-value strong {
+  color: var(--subsidy-yellow);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: right;
+}
+
 .allowance-editor strong {
-  color: #fa6400;
+  color: var(--subsidy-yellow);
   font-weight: 500;
 }
 
@@ -1341,18 +1625,12 @@ onMounted(async () => {
 
 @media (max-width: 960px) {
   .document-header {
-    grid-template-columns: 1fr;
-    gap: 6px;
+    grid-template-columns: 1fr auto;
     padding: 12px;
-    text-align: center;
-  }
-
-  .document-header > span,
-  .document-meta {
-    justify-self: center;
   }
 
   .basic-grid,
+  .trip-field-row,
   .totals {
     grid-template-columns: 1fr;
   }

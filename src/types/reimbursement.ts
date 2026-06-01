@@ -33,6 +33,7 @@ export interface ReimbursementDraftPayload {
   businessTypeId: number | null
   businessTripReason: string
   remarks: string
+  version: number | null
   trips: TripSavePayload[]
   allocations: AllocationSavePayload[]
 }
@@ -139,6 +140,7 @@ export interface ReimbursementDetail {
   transportationAllowance: number
   phoneAllowance: number
   remarks: string | null
+  version: number
   creationTime: string
   updateTime: string
   trips: TripDetail[]
